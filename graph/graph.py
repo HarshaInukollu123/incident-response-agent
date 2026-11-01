@@ -19,9 +19,11 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 from nodes.severity_classifier import severity_classifier
 from nodes.investigation_supervisor import investigation_supervisor
+from nodes.root_cause_analysis import root_cause_analysis
+from nodes.postmortem_writer import postmortem_writer
+from nodes.communication_hub import communication_hub
 from nodes.stubs import (
     alert_parser,
-    communication_hub,
     deeper_investigation,
     deploy_worker,
     escalation_node,
@@ -29,9 +31,7 @@ from nodes.stubs import (
     hitl_review,
     incident_closed,
     metrics_worker,
-    postmortem_writer,
     remediation_executor,
-    root_cause_analysis,
     runbook_worker,
     status_page_updater,
 )
