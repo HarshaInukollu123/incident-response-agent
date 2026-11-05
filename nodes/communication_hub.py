@@ -5,6 +5,7 @@ Actual API calls to Slack and Jira are stubbed here — Phase 3 replaces them
 with real integrations using webhooks and the Jira REST API.
 """
 import logging
+from integrations.slack import send_incident_notification
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
@@ -50,9 +51,15 @@ Keep Slack message under 200 characters. Be factual, not alarming."""
 
     result: CommunicationOutput = structured_llm.invoke(prompt)
 
-    # --- STUB: Phase 3 replaces these with real API calls ---
-    slack_thread_id = f"SLACK-STUB-{state['incident_id'][:8]}"
-    jira_ticket_id = f"INC-STUB-{state['incident_id'][:8]}"
+    slack_thread_id = send_incident_notification(
+    incident_id=state["incident_id"],
+    severity=state["severity"],
+    incident_type=state["incident_type"],
+    affected_systems=state["affected_systems"],
+    alert=state["clean_alert"],
+    jira_ticket_id=f"INC-{state['incident_id'][:8]}",
+    )  
+    jira_ticket_id = f"INC-{state['incident_id'][:8]}"
     # --------------------------------------------------------
 
     logger.info(f"[communication_hub] Slack drafted | Jira: {jira_ticket_id}")

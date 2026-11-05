@@ -7,3 +7,5 @@ __pycache__/
 data/chroma_db/
 .venv/
 venv/
+*.db-shm
+*.db-wal
