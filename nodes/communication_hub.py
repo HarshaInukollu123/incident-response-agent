@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from state.schema import IncidentState
+from integrations.jira import create_jira_ticket
 
 logger = logging.getLogger(__name__)
 
@@ -33,33 +34,42 @@ def communication_hub(state: IncidentState) -> dict:
     """
     logger.info(f"[communication_hub] Drafting communications for {state['incident_id']} ({state['severity']})")
 
+    if state.get("jira_ticket_id"):
+        return {"jira_ticket_id": state["jira_ticket_id"]}
+
     prompt = f"""You are an SRE drafting incident communications.
 
-Incident:
-- ID: {state['incident_id']}
-- Severity: {state['severity']}
-- Type: {state['incident_type']}
-- Affected Systems: {state['affected_systems']}
-- Alert: {state['clean_alert']}
+    Incident:
+    - ID: {state['incident_id']}
+    - Severity: {state['severity']}
+    - Type: {state['incident_type']}
+    - Affected Systems: {state['affected_systems']}
+    - Alert: {state['clean_alert']}
 
-Draft:
-1. A Slack message for the #incidents channel — clear, urgent for P1/P2, calm for P3/P4
-2. A Jira ticket summary (one line)
-3. A Jira ticket description with: what happened, impact, affected systems, initial steps
+    Draft:
+    1. A Slack message for the #incidents channel — clear, urgent for P1/P2, calm for P3/P4
+    2. A Jira ticket summary (one line)
+    3. A Jira ticket description with: what happened, impact, affected systems, initial steps
 
-Keep Slack message under 200 characters. Be factual, not alarming."""
+    Keep Slack message under 200 characters. Be factual, not alarming."""
 
     result: CommunicationOutput = structured_llm.invoke(prompt)
-
+    
+    jira_ticket_id = create_jira_ticket(
+    incident_id=state["incident_id"],
+    severity=state["severity"],
+    incident_type=state["incident_type"],
+    affected_systems=state["affected_systems"],
+    summary=result.jira_summary,   # from GPT-4o-mini structured output
+    )
     slack_thread_id = send_incident_notification(
     incident_id=state["incident_id"],
     severity=state["severity"],
     incident_type=state["incident_type"],
     affected_systems=state["affected_systems"],
     alert=state["clean_alert"],
-    jira_ticket_id=f"INC-{state['incident_id'][:8]}",
+    jira_ticket_id=jira_ticket_id,
     )  
-    jira_ticket_id = f"INC-{state['incident_id'][:8]}"
     # --------------------------------------------------------
 
     logger.info(f"[communication_hub] Slack drafted | Jira: {jira_ticket_id}")
