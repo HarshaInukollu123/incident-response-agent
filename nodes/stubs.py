@@ -33,8 +33,9 @@ def alert_parser(state: IncidentState) -> dict:
     update = _log("alert_parser", state)
 
     raw = state.get("raw_alert", "")
-    clean, found = redact_pii(raw)
-
+    result = redact_pii(raw)
+    clean = result["redacted_text"]
+    found = result["pii_detected"]
     if found:
         logger.info(f"[alert_parser] Redacted PII types: {found}")
 

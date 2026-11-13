@@ -7,6 +7,7 @@ import os
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from graph.graph import agent_graph
+from integrations.jira import update_jira_status
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,10 @@ def handle_approve(ack, body, client):
     )
 
     list(agent_graph.stream(None, config=config))
-
+    state = agent_graph.get_state(config)
+    jira_ticket = state.values.get("jira_ticket_id")
+    if jira_ticket:
+        update_jira_status(jira_ticket, "In Progress")
     client.chat_update(
         channel=body["channel"]["id"],
         ts=body["message"]["ts"],
@@ -57,7 +61,10 @@ def handle_reject(ack, body, client):
     )
 
     list(agent_graph.stream(None, config=config))
-
+    state = agent_graph.get_state(config)
+    jira_ticket = state.values.get("jira_ticket_id")
+    if jira_ticket:
+        update_jira_status(jira_ticket, "Done")
     client.chat_update(
         channel=body["channel"]["id"],
         ts=body["message"]["ts"],

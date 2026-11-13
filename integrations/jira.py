@@ -7,6 +7,8 @@ Authentication uses Basic Auth: email + API token (base64 encoded).
 import os
 import requests
 from requests.auth import HTTPBasicAuth
+import logging
+logger = logging.getLogger(__name__)
 
 JIRA_URL = os.environ["JIRA_URL"]
 JIRA_EMAIL = os.environ["JIRA_EMAIL"]
@@ -67,3 +69,41 @@ def create_jira_ticket(
     )
     response.raise_for_status()
     return response.json()["key"]   # e.g. "KAN-5"
+
+def update_jira_status(ticket_key: str, target_status: str) -> bool:
+    """
+    Moves a Jira ticket to a new status using transition IDs.
+    target_status should match the Jira column name e.g. 'In Progress', 'Done'.
+    Returns True if successful, False if transition not found.
+    """
+    # Step 1: Get available transitions for this ticket
+    r = requests.get(
+        f"{JIRA_URL}/rest/api/3/issue/{ticket_key}/transitions",
+        headers=headers,
+        auth=auth,
+    )
+    r.raise_for_status()
+    transitions = r.json().get("transitions", [])
+
+    # Step 2: Find the transition that matches target_status
+    transition_id = None
+    for t in transitions:
+        if t["to"]["name"].lower() == target_status.lower():
+            transition_id = t["id"]
+            break
+
+    if not transition_id:
+        logger.warning(f"[jira] Transition '{target_status}' not found for {ticket_key}")
+        logger.warning(f"[jira] Available: {[t['to']['name'] for t in transitions]}")
+        return False
+
+    # Step 3: Apply the transition
+    r = requests.post(
+        f"{JIRA_URL}/rest/api/3/issue/{ticket_key}/transitions",
+        headers=headers,
+        auth=auth,
+        json={"transition": {"id": transition_id}},
+    )
+    r.raise_for_status()
+    logger.info(f"[jira] {ticket_key} moved to '{target_status}'")
+    return True
