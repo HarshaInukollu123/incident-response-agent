@@ -55,8 +55,9 @@ The system is built for real-world engineering teams. It demonstrates every adva
 | HITL with persistence | `interrupt_before=["hitl_review"]` + `SQLiteSaver` |
 | Conditional loops | Confidence score loop with max-round guard |
 | Structured LLM output | `with_structured_output(PydanticModel)` on every node |
-| PII redaction pre-LLM | Regex-based scrubbing before any data reaches GPT |
+| PII redaction pre-LLM | Microsoft Presidio NER — catches names, emails, IPs, phones |
 | Real Slack integration | Block Kit messages + Socket Mode button callbacks |
+| Real Jira integration | REST API v3 — creates tickets, auto-updates status on HITL |
 | Production API | FastAPI with lifespan context manager |
 
 ---
@@ -80,6 +81,8 @@ The system is built for real-world engineering teams. It demonstrates every adva
 | Webhook server | **FastAPI** | Async, modern, auto-docs at `/docs` |
 | Slack messages | **Slack SDK WebClient** | Block Kit interactive messages |
 | Slack buttons | **Slack Bolt + Socket Mode** | Real-time button callbacks, no ngrok |
+| Jira tickets | **Jira REST API v3** | Creates tickets + auto-updates status |
+| PII detection | **Microsoft Presidio + spaCy** | ML-based NER, catches named entities |
 | Environment config | **python-dotenv** | Secure credential loading |
 | SSL certificates | **certifi** | Mac Python SSL fix |
 
@@ -129,18 +132,30 @@ incident-response-agent/
 ├── integrations/
 │   ├── __init__.py
 │   ├── slack.py               # WebClient — send Block Kit messages
-│   └── slack_socket.py        # Bolt + Socket Mode — button callbacks
+│   ├── slack_socket.py        # Bolt + Socket Mode — button callbacks
+│   └── jira.py                # Jira REST API v3 — create tickets + update status
 │
-└── data/
-    └── incidents.db            # SQLite checkpoint store (auto-created)
+├── security/
+│   └── pii_redactor.py        # Presidio ML NER — PII detection + redaction
+│
+├── data/
+│   ├── incidents.db            # SQLite checkpoint store (auto-created at runtime)
+│   └── .gitkeep               # Keeps folder in git; db file is in .gitignore
+│
+├── tools/
+│   └── .gitkeep               # Reserved: future LangChain tools for worker nodes
+│
+└── memory/
+    └── .gitkeep               # Reserved: future RAG / vector store for past incidents
 ```
 
 ### Key Design Decision: Why This Structure?
 
 - **`nodes/`** — each node is its own file. This makes it easy to swap in a real implementation later without touching the graph.
 - **`state/schema.py`** — single source of truth for state shape. Every node reads from and writes to this schema.
-- **`integrations/`** — Slack is separated into two files because `slack.py` is for *sending* (called from nodes) and `slack_socket.py` is for *receiving* (runs as a background thread).
-- **`security/`** — PII redaction is a separate module so it can be upgraded to `presidio` in Phase 4 without touching node code.
+- **`integrations/`** — external service clients are isolated here. `slack.py` sends messages, `slack_socket.py` receives button callbacks, `jira.py` manages ticket lifecycle. Each can be tested independently.
+- **`security/`** — PII redaction is a separate module so it can be upgraded without touching node code. Phase 4 upgraded it from regex to Microsoft Presidio ML-based NER.
+- **`data/`, `tools/`, `memory/`** — intentional empty directories kept via `.gitkeep`. `data/` holds the auto-created SQLite DB (gitignored). `tools/` and `memory/` are reserved for future LangChain tools and RAG vector store respectively.
 
 ---
 
@@ -405,26 +420,55 @@ class SeverityOutput(BaseModel):
 
 ### Node 2: `pii_redactor`
 **File:** `security/pii_redactor.py`  
-**Model:** No LLM — pure Python regex  
+**Model:** No LLM — Microsoft Presidio with spaCy NER  
 **Input:** `alert` (raw text)  
-**Output:** `alert` (redacted), `pii_detected`, `pii_types`, `redaction_summary`
+**Output:** `clean_alert` (redacted), `pii_detected`, `pii_types`, `redaction_summary`
 
-This node runs **before any LLM call** on the investigation path. It scrubs:
-- Email addresses → `[EMAIL]`
-- Phone numbers → `[PHONE]`
-- IP addresses → `[IP]`
-- Credit card numbers → `[CARD]`
-- Social Security Numbers → `[SSN]`
+This node runs **before any LLM call** on the investigation path. Phase 4 upgraded it from regex patterns to [Microsoft Presidio](https://github.com/microsoft/presidio) with the `en_core_web_lg` spaCy model for ML-based Named Entity Recognition.
+
+**Entities detected and redacted:**
+
+| Entity | Example input | Redacted to |
+|---|---|---|
+| `PERSON` | `John Smith` | `[PERSON]` |
+| `EMAIL_ADDRESS` | `john@acme.com` | `[EMAIL_ADDRESS]` |
+| `PHONE_NUMBER` | `+1 (555) 123-4567` | `[PHONE_NUMBER]` |
+| `IP_ADDRESS` | `192.168.1.1` | `[IP_ADDRESS]` |
+| `CREDIT_CARD` | `4111 1111 1111 1111` | `[CREDIT_CARD]` |
+| `US_SSN` | `123-45-6789` | `[US_SSN]` |
+| `LOCATION` | `Seattle, WA` | `[LOCATION]` |
+| `URL` | `https://internal.corp` | `[URL]` |
 
 ```python
-PATTERNS = {
-    "email": r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
-    "phone": r'\b(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b',
-    "ip_address": r'\b(?:\d{1,3}\.){3}\d{1,3}\b',
-    "credit_card": r'\b(?:\d{4}[-\s]?){3}\d{4}\b',
-    "ssn": r'\b\d{3}-\d{2}-\d{4}\b',
+from presidio_analyzer import AnalyzerEngine
+from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
+
+analyzer = AnalyzerEngine()
+anonymizer = AnonymizerEngine()
+
+ENTITIES = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "IP_ADDRESS",
+            "CREDIT_CARD", "US_SSN", "LOCATION", "URL"]
+
+OPERATORS = {
+    entity: OperatorConfig("replace", {"new_value": f"[{entity}]"})
+    for entity in ENTITIES
 }
+
+def redact_pii(text: str) -> dict:
+    results = analyzer.analyze(text=text, entities=ENTITIES, language="en")
+    if not results:
+        return {"redacted_text": text, "pii_detected": False, "pii_types": [], ...}
+    anonymized = anonymizer.anonymize(text=text, analyzer_results=results, operators=OPERATORS)
+    return {
+        "redacted_text": anonymized.text,
+        "pii_detected": True,
+        "pii_types": list({r.entity_type for r in results}),
+        "redaction_summary": f"Redacted {len(results)} item(s)",
+    }
 ```
+
+**Why Presidio over regex?** Regex misses contextual PII like names and company affiliations. Presidio's NER model understands that "John Smith from Acme Corp called about the outage" contains a person and organization — without any pattern matching.
 
 **Why before LLM?** Once data reaches GPT, it enters OpenAI's infrastructure. PII redaction must happen in-process, before the first API call.
 
@@ -561,20 +605,21 @@ The initial notification (with HITL buttons) is also sent from here, before the 
 
 **File:** `security/pii_redactor.py`
 
-**Current implementation:** Regex-based, zero external dependencies.
+**Implementation:** Microsoft Presidio with spaCy `en_core_web_lg` — ML-based Named Entity Recognition. Upgraded from regex in Phase 4.
 
 **How to use it:**
 
 ```python
 from security.pii_redactor import redact_pii
 
-result = redact_pii("User john@example.com reported error from 192.168.1.1")
-# result["redacted_text"] → "User [EMAIL] reported error from [IP]"
+result = redact_pii("John Smith from Acme called +1-555-234-5678. His email is john@acme.com and IP is 10.0.0.1")
+# result["redacted_text"] → "[PERSON] from Acme called [PHONE_NUMBER]. His email is [EMAIL_ADDRESS] and IP is [IP_ADDRESS]"
 # result["pii_detected"] → True
-# result["pii_types"] → ["email", "ip_address"]
+# result["pii_types"] → ["PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", "IP_ADDRESS"]
+# result["redaction_summary"] → "Redacted 4 item(s): PERSON, PHONE_NUMBER, EMAIL_ADDRESS, IP_ADDRESS"
 ```
 
-**Phase 4 upgrade:** Replace regex with [Microsoft Presidio](https://github.com/microsoft/presidio) for ML-powered NER detection (catches "John Smith at Acme Corp" as PII even without email format).
+**Key advantage over regex:** Catches contextual entities like full names and locations that have no fixed pattern — something regex cannot do.
 
 ---
 
@@ -772,6 +817,71 @@ The confidence score is not just a number — it represents GPT-4o's epistemic u
 
 ---
 
+### 8.9 Jira Integration
+
+**File:** `integrations/jira.py`
+
+The Jira integration uses the **Jira REST API v3** with HTTP Basic Auth (email + API token). It has two responsibilities: creating the initial incident ticket and auto-updating its status after the HITL decision.
+
+#### Creating a Ticket
+
+```python
+from integrations.jira import create_jira_ticket
+
+ticket_key = create_jira_ticket(
+    incident_id="INC-A3F2B1C4",
+    severity="P1",
+    incident_type="database",
+    affected_systems=["api-gateway", "postgres-primary"],
+    summary="Database connection pool exhausted. Latency spike to 8000ms."
+)
+# ticket_key → "KAN-10"
+```
+
+Jira v3 requires descriptions in **Atlassian Document Format (ADF)** — a JSON structure, not plain text. The integration handles this automatically:
+
+```python
+"description": {
+    "type": "doc", "version": 1,
+    "content": [{"type": "paragraph", "content": [{"type": "text",
+        "text": f"Incident ID: {incident_id}\nSeverity: {severity}\n..."}]}]
+}
+```
+
+#### Auto-Updating Ticket Status After HITL
+
+When the human clicks Approve or Reject in Slack, `slack_socket.py` calls `update_jira_status()`:
+
+```python
+# Approve → move to "In Progress"
+update_jira_status(ticket_key="KAN-10", target_status="In Progress")
+
+# Reject → move to "Done"
+update_jira_status(ticket_key="KAN-10", target_status="Done")
+```
+
+Jira doesn't allow setting status by name directly. The integration uses the **transitions API**:
+1. `GET /rest/api/3/issue/{key}/transitions` — fetch available transitions
+2. Find the transition whose `to.name` matches `target_status`
+3. `POST /rest/api/3/issue/{key}/transitions` with the matching transition ID
+
+This means the status names ("In Progress", "Done") must match your Jira project's workflow exactly.
+
+#### Idempotency Guard
+
+`communication_hub` includes a guard to prevent duplicate Jira tickets when the graph resumes from a SQLite checkpoint:
+
+```python
+def communication_hub(state: IncidentState) -> dict:
+    if state.get("jira_ticket_id"):
+        return {"jira_ticket_id": state["jira_ticket_id"]}  # Already created — skip
+    # ... create ticket
+```
+
+This protects against the ticket being created twice if `uvicorn --reload` restarts while the graph is paused at HITL.
+
+---
+
 ## 9. API Reference
 
 ### `POST /webhook/alert`
@@ -877,13 +987,13 @@ SLACK_BOT_TOKEN=xoxb-...        # Bot OAuth token (from OAuth & Permissions)
 SLACK_APP_TOKEN=xapp-...        # App-level token (for Socket Mode)
 SLACK_CHANNEL_ID=C0XXXXXXXXX    # Channel ID for incident notifications
 
-# Optional: Jira Integration (Phase 4)
+# Jira Integration (Phase 4 — required for ticket creation)
 JIRA_URL=https://yourcompany.atlassian.net
 JIRA_EMAIL=your.email@company.com
-JIRA_API_TOKEN=...
-JIRA_PROJECT_KEY=INC
+JIRA_API_TOKEN=...              # Create at id.atlassian.com → Security → API tokens
+JIRA_PROJECT_KEY=KAN            # Your Jira project key (shown in board URL)
 
-# Optional: Database (Phase 4)
+# Optional: PostgreSQL (future upgrade from SQLite)
 POSTGRES_DSN=postgresql://user:pass@localhost:5432/incidents
 ```
 
@@ -1047,51 +1157,24 @@ graph_builder.add_node("my_new_worker", my_new_worker)
 
 ---
 
-### Add a Real Jira Integration
+### Add Real Worker Nodes
 
-Replace the stub in `communication_hub.py`:
+Replace the stubs in `nodes/stubs.py` with actual integrations. For example, replace `logs_worker`:
 
 ```python
-import requests
+# nodes/logs_worker.py — query your log provider
+import boto3  # or elasticsearch, etc.
 
-def create_jira_ticket(incident_id, summary, description):
-    response = requests.post(
-        f"{os.environ['JIRA_URL']}/rest/api/3/issue",
-        auth=(os.environ['JIRA_EMAIL'], os.environ['JIRA_API_TOKEN']),
-        json={
-            "fields": {
-                "project": {"key": os.environ['JIRA_PROJECT_KEY']},
-                "summary": summary,
-                "description": {"type": "doc", "version": 1, "content": [...]},
-                "issuetype": {"name": "Incident"}
-            }
-        }
+def logs_worker(state: IncidentState) -> dict:
+    client = boto3.client("logs")
+    # Query CloudWatch Logs for the affected service
+    response = client.filter_log_events(
+        logGroupName=f"/aws/app/{state['service']}",
+        filterPattern=state["alert"][:100],
+        startTime=int((time.time() - 3600) * 1000),  # Last 1 hour
     )
-    return response.json()["key"]
-```
-
----
-
-### Upgrade PII Redaction to Presidio
-
-```bash
-pip install presidio-analyzer presidio-anonymizer
-python -m spacy download en_core_web_lg
-```
-
-Replace regex patterns in `security/pii_redactor.py`:
-
-```python
-from presidio_analyzer import AnalyzerEngine
-from presidio_anonymizer import AnonymizerEngine
-
-analyzer = AnalyzerEngine()
-anonymizer = AnonymizerEngine()
-
-def redact_pii(text: str) -> dict:
-    results = analyzer.analyze(text=text, entities=["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "IP_ADDRESS"], language="en")
-    anonymized = anonymizer.anonymize(text=text, analyzer_results=results)
-    return {"redacted_text": anonymized.text, "pii_detected": bool(results), ...}
+    findings = "\n".join(e["message"] for e in response["events"][:20])
+    return {"log_findings": findings or "No relevant log entries found."}
 ```
 
 ---
@@ -1113,4 +1196,4 @@ This enables multi-instance deployments where different FastAPI pods can all acc
 
 ---
 
-*Last updated: Phase 3 complete — FastAPI webhook + Slack HITL integration working.*
+*Last updated: Phase 4 complete — Presidio ML PII redaction + Jira REST API integration (ticket creation + status auto-update after HITL).*

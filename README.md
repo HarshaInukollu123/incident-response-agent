@@ -32,7 +32,8 @@ When a production alert fires, this agent:
 | Slack Block Kit + Socket Mode | `integrations/slack.py` + `slack_socket.py` |
 | FastAPI webhook | `api/app.py` |
 | Pydantic structured output | All 5 LLM nodes |
-| PII redaction (pre-LLM) | `security/pii_redactor.py` |
+| Presidio ML PII redaction | `security/pii_redactor.py` — catches names, IPs, emails |
+| Jira REST API v3 | `integrations/jira.py` — ticket creation + status auto-update |
 
 ---
 
@@ -47,7 +48,8 @@ pip install -r requirements.txt
 
 # 2. Configure credentials
 cp .env.example .env
-# Fill in OPENAI_API_KEY, SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_CHANNEL_ID
+# Fill in OPENAI_API_KEY, SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_CHANNEL_ID,
+# JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_PROJECT_KEY
 
 # 3. Start the server
 uvicorn api.app:app --reload --port 8000
@@ -80,11 +82,18 @@ incident-response-agent/
 │   ├── root_cause_analysis.py  # GPT-4o — confidence loop
 │   ├── postmortem_writer.py    # GPT-4o — blameless postmortem
 │   ├── communication_hub.py    # GPT-4o-mini — Slack + Jira
-│   └── stubs.py                # 11 placeholder nodes (Phase 4)
+│   └── stubs.py                # 11 placeholder worker nodes
 ├── integrations/
 │   ├── slack.py                # WebClient — send Block Kit messages
-│   └── slack_socket.py         # Bolt + Socket Mode — button callbacks
-├── security/pii_redactor.py    # Regex PII scrubbing
+│   ├── slack_socket.py         # Bolt + Socket Mode — button callbacks
+│   └── jira.py                 # REST API v3 — create tickets + update status
+├── security/pii_redactor.py    # Presidio ML NER — PII detection + redaction
+├── data/
+│   └── .gitkeep               # incidents.db auto-created here (gitignored)
+├── tools/
+│   └── .gitkeep               # Reserved: future LangChain tools for workers
+├── memory/
+│   └── .gitkeep               # Reserved: future RAG / vector store
 ├── requirements.txt
 ├── .env.example
 └── documentation.md            # Full end-to-end documentation
@@ -99,9 +108,13 @@ OPENAI_API_KEY=sk-...
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
 SLACK_CHANNEL_ID=C0XXXXXXXXX
+JIRA_URL=https://yourcompany.atlassian.net
+JIRA_EMAIL=your@email.com
+JIRA_API_TOKEN=...
+JIRA_PROJECT_KEY=KAN
 ```
 
-See [documentation.md](documentation.md) for the full list including Jira and PostgreSQL variables.
+See [documentation.md](documentation.md) for setup instructions for each credential.
 
 ---
 
@@ -139,13 +152,13 @@ Slack Socket Mode uses a persistent WebSocket from your server to Slack. No publ
 | Phase 1 | ✅ Complete | 16-node skeleton with stubs — full graph runs |
 | Phase 2 | ✅ Complete | 5 real LLM nodes — GPT-4o and GPT-4o-mini |
 | Phase 3 | ✅ Complete | FastAPI webhook + Slack HITL integration |
-| Phase 4 | 🔜 Planned | Presidio PII, Jira API, PostgreSQL, rate limiting |
+| Phase 4 | ✅ Complete | Presidio ML PII + Jira REST API + status auto-update |
 
 ---
 
 ## Tech Stack
 
-`LangGraph` · `LangChain` · `OpenAI GPT-4o` · `FastAPI` · `Slack SDK` · `Slack Bolt` · `SQLiteSaver` · `Pydantic` · `uvicorn` · `python-dotenv` · `certifi`
+`LangGraph` · `LangChain` · `OpenAI GPT-4o` · `FastAPI` · `Slack SDK` · `Slack Bolt` · `SQLiteSaver` · `Pydantic` · `presidio-analyzer` · `presidio-anonymizer` · `spaCy` · `uvicorn` · `python-dotenv` · `certifi`
 
 ---
 
